@@ -202,6 +202,33 @@ implementation forced:
 - The mechanism is otherwise as in §3–§5: raw-sample → linear compose → `set_atlas_encoding(LINEAR)`
   → the weaver's output encode. In-process paths and UNORM workspaces are unchanged Model A.
 
+### As shipped (vk_native, #1589 + #1610)
+
+The Vulkan compose path takes a third shape that §5's A/B pair does not name,
+and it is worth writing down so nobody files it as one of them:
+
+> **Compose in LINEAR, encode at the boundary, hand the DP ENCODED.**
+
+Model B declares the *atlas* linear and leaves the matched encode to the DP.
+This does not: the encode happens on store into a runtime-private compose
+target (attached through an `_SRGB` view), and the atlas the DP receives is
+still encoded, so `set_atlas_encoding` is never called and an un-updated
+plug-in is unaffected. It gets Model B's correctness where it matters —
+alpha compositing in linear light — **without** the DP-facing contract change,
+which is why it can land on a backend whose vendor plug-ins have not moved.
+
+Two consequences of §6 becoming operational here:
+
+- **The format is now believed.** An `_SRGB` source is decoded on sample; a
+  UNORM source is read as the linear values the OpenXR spec says it holds
+  ("All other formats will be treated as linear values"). The matched encode
+  is the attachment's, on store — never a lone decode.
+- **Passthrough is no longer universally safe.** The `vkCmdBlitImage` fast
+  path is restricted to frames whose source is already `_SRGB`; a UNORM source
+  must take the render pass, because passing its linear bytes to an `ENCODED`
+  DP renders them far too dark. This is the cost §6 always implied and it
+  falls on exactly the apps the migration is moving.
+
 ## Encoding state at each hop (current baseline = Model A; DP configured for encoded passthrough)
 
 | Hop | In-process | IPC / service | Workspace / shell |

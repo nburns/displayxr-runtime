@@ -43,6 +43,17 @@ The swapchain → per-client atlas blit is a raw `CopySubresourceRegion` regardl
 
 The non-workspace atlas remains UNORM-typed (single `atlas_srv`); only the workspace-mode atlas is TYPELESS-with-dual-SRV. Do not refactor the swapchain → atlas blit into a shared shader path.
 
+## Color-space handling (vk_native compose pass)
+
+The Vulkan backend reaches the same DP-facing result by a different route, and the difference is worth stating because it is *neither* Model A nor Model B as the D3D11 service implements them: **the compose space is linear, and the encode happens at the boundary, but the atlas the DP receives is still ENCODED** (`set_atlas_encoding` is never called, so the default `ENCODED` stands). No DP change, no ABI change.
+
+- **Two compose paths, chosen once per frame.** The **blit** fast path (`vkCmdBlitImage`) is taken only when the frame has a single drawable layer, no zones, *and* the source is already an `_SRGB` swapchain — then passthrough is correct and the commands are byte-for-byte what they always were. Everything else takes the **render pass**, because `loadOp = CLEAR` covers the whole target and a frame cannot be half-blitted and half-drawn.
+- **Sources are read honestly.** The pass samples through a view in the format the *app requested* (`comp_vk_native_swapchain_get_true_image_view`), so an `_SRGB` source is hardware-decoded to linear and a UNORM one is read as the linear values OpenXR says it holds. The non-decoding views and [#1559](https://github.com/DisplayXR/displayxr-runtime/issues/1559)'s UNORM scratch survive to serve the **blit path only** — wiring them into the pass would double-encode.
+- **Blending is linear.** The pass renders into a runtime-private image (same format as the atlas, `MUTABLE_FORMAT` with a `{UNORM, SRGB}` format list) attached through its **`_SRGB` view**, so the fixed-function blender decodes, blends in linear light and re-encodes on store. This is what [#1610](https://github.com/DisplayXR/displayxr-runtime/issues/1610) asks for; no shader applies a transfer function.
+- **Handoff is a copy, never a blit.** `vkCmdCopyImage` between two identically formatted images moves raw bytes. `vkCmdBlitImage` *converts* between the sRGB and UNORM interpretations and would apply the encode twice. **Do not "simplify" that copy into a blit.**
+- **The driver assumption is checked, not assumed.** Blending-in-linear through an `_SRGB` view over a `MUTABLE_FORMAT` UNORM image is driver behaviour; `tools/vk_srgb_blend_probe.c` A/Bs it against a natively-`_SRGB` image. Verified on Apple M1 Pro / MoltenVK (both `(188,188,188,128)`). **Re-run it on a new GPU vendor or driver stack — Android (Adreno, Mali) is untested.**
+
+
 ## Per-tile alpha (workspace mode)
 
 The multi-compositor's tile-blit phase respects each IPC client's
